@@ -1,11 +1,34 @@
 // =========================
 // Bibliotecas
 // =========================
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 #include <SPI.h>
 #include "DHT.h"
 #include <Preferences.h>
+
+// ====== Config Wi-Fi ======
+const char* ssid = "";
+const char* password = "leonardohehe";
+
+// ====== Config AWS ======
+const char* aws_endpoint = "xxxxx-ats.iot.sa-east-1.amazonaws.com";
+const int port = 8883;
+const char* mqtt_topic = "puresense/sensores";
+
+// ====== Certificados AWS (exemplo em texto) ======
+// 🔴 RECOMENDADO: Use arquivos externos (.pem) para segurança real.
+const char* ca_cert = "-----BEGIN CERTIFICATE-----\n..."; // AmazonRootCA1
+const char* client_cert = "-----BEGIN CERTIFICATE-----\n..."; // Cert device
+const char* private_key = "-----BEGIN PRIVATE KEY-----\n...";
+
+// // Caminhos para os certificados
+// #define CERT_CA "/AmazonRootCA1.pem"
+// #define CERT_CLIENT "/cert.pem.crt"
+// #define CERT_KEY "/private.pem.key"
 
 // =========================
 // Definição dos pinos
@@ -34,6 +57,10 @@ Adafruit_ST7735 tft = Adafruit_ST7735(TFT_CS, TFT_DC, TFT_RST);
 
 Preferences prefs;
 
+// ====== Objetos Wi-Fi e MQTT ======
+WiFiClientSecure net;
+PubSubClient client(net);
+
 // Resistência de carga (verifique seu módulo, geralmente é 10K)
 const float RL_MQ7 = 10.0;
 const float RL_MQ2 = 10.0;
@@ -47,6 +74,8 @@ float R0_MQ2 = 0;
 // =========================
 void setup() {
   Serial.begin(115200);
+  connectWiFi();
+  connectAWS();
 
   // Inicia sensores
   dht.begin();
@@ -69,11 +98,14 @@ void setup() {
 // Loop principal
 // =========================
 void loop() {
-  // Leitura DHT11
-  float temp = dht.readTemperature();
-  float umid = dht.readHumidity();
+  if (!client.connected()) connectAWS();
+  client.loop();
 
-  if (isnan(temp) || isnan(umid)) {
+  // Leitura DHT11
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+
+  if (isnan(temperature) || isnan(humidity)) {
     Serial.println("Erro na leitura do DHT11");
   }
 
@@ -82,25 +114,28 @@ void loop() {
   float volt_mq7 = adc_mq7 * (3.3 / 4095.0);
   float Rs_mq7 = (3.3 - volt_mq7) * RL_MQ7 / volt_mq7;
   float ratio_mq7 = Rs_mq7 / R0_MQ7;
-  float ppm_mq7 = pow((ratio_mq7 / 99.042), (1.0 / -1.518)); // Exemplo curva CO
+  float co_ppm_mq7 = pow((ratio_mq7 / 99.042), (1.0 / -1.518)); // Exemplo curva CO
 
   // Leitura MQ-2
   float adc_mq2 = analogRead(MQ2_PIN);
   float volt_mq2 = adc_mq2 * (3.3 / 4095.0);
   float Rs_mq2 = (3.3 - volt_mq2) * RL_MQ2 / volt_mq2;
   float ratio_mq2 = Rs_mq2 / R0_MQ2;
-  float ppm_mq2 = pow((ratio_mq2 / 9.8), (1.0 / -2.0)); // Curva genérica fumaça
+  float gases_ppm_mq2 = pow((ratio_mq2 / 9.8), (1.0 / -2.0)); // Curva genérica fumaça
 
   // Debug Serial
   Serial.println("====== Leitura ======");
-  Serial.print("Temperatura: "); Serial.print(temp); Serial.println(" C");
-  Serial.print("Umidade: "); Serial.print(umid); Serial.println(" %");
-  Serial.print("CO (MQ-7): "); Serial.print(ppm_mq7); Serial.println(" ppm");
-  Serial.print("Gases (MQ-2): "); Serial.print(ppm_mq2); Serial.println(" ppm");
+  Serial.print("Temperatura: "); Serial.print(temperature); Serial.println(" C");
+  Serial.print("Umidade: "); Serial.print(humidity); Serial.println(" %");
+  Serial.print("CO (MQ-7): "); Serial.print(co_ppm_mq7); Serial.println(" ppm");
+  Serial.print("Gases (MQ-2): "); Serial.print(gases_ppm_mq2); Serial.println(" ppm");
   Serial.println("=====================");
 
   // Display
-  atualizarDisplay(temp, umid, ppm_mq7, ppm_mq2);
+  atualizarDisplay(temperature, humidity, co_ppm_mq7, gases_ppm_mq2);
+
+  // AWS
+  sendToAWS(temperature, humidity, co_ppm_mq7, gases_ppm_mq2);
 
   delay(300000); // 5 minutos entre leituras
 }
@@ -151,7 +186,7 @@ void calibrarMQ() {
 // =========================
 // Atualizar Display
 // =========================
-void atualizarDisplay(float temp, float umid, float ppm_mq7, float ppm_mq2) {
+void atualizarDisplay(float temperature, float humidity, float co_ppm_mq7, float gases_ppm_mq2) {
   tft.fillScreen(ST77XX_BLACK);
 
   tft.setCursor(5, 5);
@@ -160,14 +195,53 @@ void atualizarDisplay(float temp, float umid, float ppm_mq7, float ppm_mq2) {
   tft.println("PureSense Monitor");
 
   tft.setCursor(5, 25);
-  tft.print("Temp: "); tft.print(temp); tft.println(" C");
+  tft.print("Temp: "); tft.print(temperature); tft.println(" C");
 
   tft.setCursor(5, 40);
-  tft.print("Umid: "); tft.print(umid); tft.println(" %");
+  tft.print("Umid: "); tft.print(humidity); tft.println(" %");
 
   tft.setCursor(5, 55);
-  tft.print("CO: "); tft.print(ppm_mq7); tft.println(" ppm");
+  tft.print("CO: "); tft.print(co_ppm_mq7); tft.println(" ppm");
 
   tft.setCursor(5, 70);
-  tft.print("Gases: "); tft.print(ppm_mq2); tft.println(" ppm");
+  tft.print("Gases: "); tft.print(gases_ppm_mq2); tft.println(" ppm");
+}
+
+void connectWiFi() {
+  WiFi.begin(ssid, password);
+  Serial.print("Conectando ao Wi-Fi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500); Serial.print(".");
+  }
+  Serial.println("\n✅ Wi-Fi conectado.");
+}
+
+void connectAWS() {
+  net.setCACert(ca_cert);
+  net.setCertificate(client_cert);
+  net.setPrivateKey(private_key);
+  client.setServer(aws_endpoint, port);
+  while (!client.connected()) {
+    Serial.print("Conectando à AWS IoT...");
+    if (client.connect("ESP32_PureSense")) {
+      Serial.println("✅ Conectado!");
+    } else {
+      Serial.print("Falha: ");
+      Serial.println(client.state());
+      delay(2000);
+    }
+  }
+}
+
+void sendToAWS(float temperature, float humidity, float co_ppm_mq7, float gases_ppm_mq2) {
+  String payload = "{";
+  payload += "\"temperature\":" + String(temperature, 1) + ",";
+  payload += "\"humidity\":" + String(humidity, 1) + ",";
+  payload += "\"co\":" + String(co_ppm_mq7, 2) + ",";
+  payload += "\"gases\":" + String(gases_ppm_mq2, 2);
+  payload += "}";
+
+  client.publish(mqtt_topic, payload.c_str());
+  Serial.println("📤 Enviado para AWS IoT:");
+  Serial.println(payload);
 }
