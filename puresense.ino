@@ -12,7 +12,7 @@
 
 // ====== Config Wi-Fi ======
 const char* ssid = "";
-const char* password = "leonardohehe";
+const char* password = "";
 
 // ====== Config AWS ======
 const char* aws_endpoint = "xxxxx-ats.iot.sa-east-1.amazonaws.com";
