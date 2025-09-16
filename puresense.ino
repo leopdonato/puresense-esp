@@ -9,26 +9,29 @@
 #include <SPI.h>
 #include "DHT.h"
 #include <Preferences.h>
+#include <ArduinoJson.h>
 
 // ====== Config Wi-Fi ======
-const char* ssid = "";
+const char* ssid = "Movimento sem net";
 const char* password = "";
 
 // ====== Config AWS ======
-const char* aws_endpoint = "xxxxx-ats.iot.sa-east-1.amazonaws.com";
+const char* aws_endpoint = "";
 const int port = 8883;
 const char* mqtt_topic = "puresense/sensores";
 
 // ====== Certificados AWS (exemplo em texto) ======
-// 🔴 RECOMENDADO: Use arquivos externos (.pem) para segurança real.
-const char* ca_cert = "-----BEGIN CERTIFICATE-----\n..."; // AmazonRootCA1
-const char* client_cert = "-----BEGIN CERTIFICATE-----\n..."; // Cert device
-const char* private_key = "-----BEGIN PRIVATE KEY-----\n...";
+// TODO: Use arquivos externos (.pem) para segurança real.
 
-// // Caminhos para os certificados
-// #define CERT_CA "/AmazonRootCA1.pem"
-// #define CERT_CLIENT "/cert.pem.crt"
-// #define CERT_KEY "/private.pem.key"
+// Certificado da Amazon (Root CA 1)
+static const char ca_cert[];
+
+// Certificado do Dispositivo
+static const char client_cert[];
+
+// Chave Privada do Dispositivo
+static const char private_key[];
+// >>>>>>>>>> FIM DA ÁREA DE DADOS <<<<<<<<<<
 
 // =========================
 // Definição dos pinos
@@ -61,7 +64,7 @@ Preferences prefs;
 WiFiClientSecure net;
 PubSubClient client(net);
 
-// Resistência de carga (verifique seu módulo, geralmente é 10K)
+// Resistência de carga (verificar o módulo, geralmente é 10K)
 const float RL_MQ7 = 10.0;
 const float RL_MQ2 = 10.0;
 
@@ -75,6 +78,7 @@ float R0_MQ2 = 0;
 void setup() {
   Serial.begin(115200);
   connectWiFi();
+  synchTime();
   connectAWS();
 
   // Inicia sensores
@@ -221,27 +225,73 @@ void connectAWS() {
   net.setCertificate(client_cert);
   net.setPrivateKey(private_key);
   client.setServer(aws_endpoint, port);
+  
+  // Gera o Client ID a partir do MAC Address
+  String clientId = "ESP32_PureSense-" + getMacAddress();
+  Serial.print("Tentando conectar com o Client ID: ");
+  Serial.println(clientId);
+
   while (!client.connected()) {
     Serial.print("Conectando à AWS IoT...");
-    if (client.connect("ESP32_PureSense")) {
+    if (client.connect(clientId.c_str())) {
       Serial.println("✅ Conectado!");
     } else {
       Serial.print("Falha: ");
       Serial.println(client.state());
+      Serial.println("Tentando novamente em 2 segundos...");
       delay(2000);
     }
   }
 }
 
 void sendToAWS(float temperature, float humidity, float co_ppm_mq7, float gases_ppm_mq2) {
-  String payload = "{";
-  payload += "\"temperature\":" + String(temperature, 1) + ",";
-  payload += "\"humidity\":" + String(humidity, 1) + ",";
-  payload += "\"co\":" + String(co_ppm_mq7, 2) + ",";
-  payload += "\"gases\":" + String(gases_ppm_mq2, 2);
-  payload += "}";
+  // String payload = "{";
+  // payload += "\"temperature\":" + String(temperature, 1) + ",";
+  // payload += "\"humidity\":" + String(humidity, 1) + ",";
+  // payload += "\"co\":" + String(co_ppm_mq7, 2) + ",";
+  // payload += "\"gases\":" + String(gases_ppm_mq2, 2);
+  // payload += "}";
 
-  client.publish(mqtt_topic, payload.c_str());
+  // client.publish(mqtt_topic, payload.c_str());
+  // Serial.println("📤 Enviado para AWS IoT:");
+  // Serial.println(payload);
+  StaticJsonDocument<200> doc; // Crie um documento JSON
+
+  // Adiciona o ID único ao JSON
+  doc["deviceId"] = getMacAddress();
+  // Adicione os dados dos sensores
+  doc["temperature"] = temperature;
+  doc["humidity"] = humidity;
+  doc["co"] = co_ppm_mq7;
+  doc["gases"] = gases_ppm_mq2;
+
+  char jsonBuffer[512];
+  serializeJson(doc, jsonBuffer); // Converte o JSON para uma string
+
+  client.publish(mqtt_topic, jsonBuffer); // Publica a string
   Serial.println("📤 Enviado para AWS IoT:");
-  Serial.println(payload);
+  Serial.println(jsonBuffer);
+}
+
+void synchTime() {
+  const char* ntpServer = "pool.ntp.org";
+  const long  gmtOffset_sec = -10800; // Offset para Horário de Brasília (GMT-3)
+  const int   daylightOffset_sec = 0;   // Sem horário de verão
+
+  Serial.print("Sincronizando a hora...");
+  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+  
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    Serial.println(" ❌ Falha ao obter a hora. Reiniciando...");
+    delay(1000);
+    ESP.restart();
+  }
+  Serial.println("\n✅ Hora sincronizada!");
+}
+
+String getMacAddress() {
+  String mac = WiFi.macAddress();
+  mac.replace(":", ""); // Remove os dois-pontos
+  return mac;
 }
